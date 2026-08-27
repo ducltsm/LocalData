@@ -49,8 +49,9 @@ parse dữ liệu — ClickHouse tự đọc Parquet. Mỗi app một database C
 
 **Định nghĩa xong:** trigger DAG cho `<NGÀY_TEST>` → dữ liệu ngày đó nằm trong
 `<CH_DB>.events_raw` khớp số dòng BigQuery, `<CH_DB>.events_flat` có đủ số dòng
-bằng raw và cột động sinh tự động; unit + integration test pass; không secret nào
-trong git.
+bằng raw và cột động sinh tự động; **job dump trên BigQuery Job history là loại
+`extract` (bytes_billed = 0), không phải `query`**; unit + integration test pass;
+không secret nào trong git.
 
 ## 1. Tầng raw — `<CH_DB>.events_raw`
 
@@ -117,6 +118,15 @@ trong git.
    không kích hoạt nhầm downstream.
 
 ## 4. ⚠️ Bài học ĐÃ TRẢ GIÁ — coi là ràng buộc, đừng khám phá lại
+
+**Chi phí BigQuery (đã đo thật):** `EXPORT DATA` là query — bị tính tiền theo
+bytes quét ($6.25/TB on-demand): app 52M dòng/ngày = ~57GB logical ≈ $0.36/ngày,
+backfill 1 năm ≈ $130 CHỈ RIÊNG tiền quét. **Extract job** (`bq extract` /
+`client.extract_table` / `BigQueryToGCSOperator`) xuất nguyên bảng ra Parquet/SNAPPY
+y hệt nhưng **$0** (không dùng slot, quota 50TB/ngày). Ba lưu ý: (1) extract không
+có `overwrite` → PHẢI có task dọn staging prefix ngay trước nó; (2) chỉ xuất nguyên
+bảng, không WHERE/transform — khớp nguyên tắc dump thô; (3) `SELECT count(*)` không
+WHERE trả lời từ metadata, 0 bytes billed — bước đối chiếu vốn miễn phí, giữ nguyên.
 
 **Timezone/`ds` (bug off-by-one thật):** macro `ds` của Airflow render theo UTC.
 Cron `0 4 * * *` timezone +07 → `ds` lùi 1 ngày so với chủ đích (04:00+07 = 21:00 UTC
