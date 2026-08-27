@@ -1,4 +1,16 @@
-"""Render + chạy câu EXPORT DATA (dump thô, không transform)."""
+"""Dump thô bảng GA4 ra GCS.
+
+Đường chính: **extract job** (`run_extract`) — job xuất nguyên bảng, KHÔNG dùng
+slot, KHÔNG tính tiền query (EXPORT DATA quét 56.8GB logical/ngày với app lớn
+~ $0.36/ngày; extract job = $0). Pipeline này dump thô không transform nên khớp
+extract job 100%.
+
+Lưu ý vận hành: extract job KHÔNG có overwrite — phải xoá prefix staging trước
+khi extract (gcs.delete_prefix), nếu không file thừa của run cũ sẽ bị đọc lẫn.
+
+Đường legacy: `render_export_sql` (EXPORT DATA) giữ lại cho trường hợp sau này
+cần export CÓ LỌC/transform — chấp nhận trả phí quét.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +26,35 @@ log = logging.getLogger(__name__)
 _TEMPLATE = Path(__file__).resolve().parent / "sql" / "dump_raw.sql.j2"
 
 
+def staging_uri(bucket: str, staging_prefix: str, ds: str) -> str:
+    """URI đích trên GCS (wildcard bắt buộc vì bảng > 1GB xuất nhiều file)."""
+    return f"gs://{bucket}/{staging_prefix}/dt={ds}/part-*.parquet"
+
+
+def run_extract(
+    client: bigquery.Client,
+    *,
+    project_id: str,
+    dataset: str,
+    source_table: str,
+    bucket: str,
+    staging_prefix: str,
+    ds: str,
+) -> None:
+    """Extract job: xuất NGUYÊN bảng ra Parquet/SNAPPY — miễn phí, nested giữ nguyên.
+
+    Nhớ xoá prefix staging trước khi gọi (extract không tự dọn file cũ).
+    """
+    uri = staging_uri(bucket, staging_prefix, ds)
+    log.info("Extract job (miễn phí): %s.%s.%s -> %s", project_id, dataset, source_table, uri)
+    job_config = bigquery.job.ExtractJobConfig(
+        destination_format="PARQUET", compression="SNAPPY"
+    )
+    client.extract_table(
+        f"{project_id}.{dataset}.{source_table}", uri, job_config=job_config
+    ).result()
+
+
 def render_export_sql(
     *,
     project_id: str,
@@ -23,7 +64,7 @@ def render_export_sql(
     staging_prefix: str,
     ds: str,
 ) -> str:
-    """Render dump_raw.sql.j2 — chỉ EXPORT DATA ... SELECT *, không UNNEST/cast."""
+    """LEGACY — EXPORT DATA (bị tính tiền theo bytes quét). Mặc định dùng run_extract."""
     return render_template(
         _TEMPLATE,
         project_id=project_id,
@@ -36,6 +77,6 @@ def render_export_sql(
 
 
 def run_export(client: bigquery.Client, sql: str) -> None:
-    """Chạy EXPORT DATA và chờ xong (dùng cho DAG backfill; DAG daily dùng operator)."""
-    log.info("Chạy EXPORT DATA:\n%s", sql)
+    """LEGACY — chạy EXPORT DATA (trả phí quét). Mặc định dùng run_extract."""
+    log.info("Chạy EXPORT DATA (LEGACY, có phí quét):\n%s", sql)
     client.query(sql).result()

@@ -9,13 +9,21 @@ không schema registry (xem [ROADMAP.md](ROADMAP.md)).
 
 ```
 BigQuery events_[intraday_]YYYYMMDD
-        │  EXPORT DATA (SELECT * — không transform)
+        │  extract job (bq extract — xuất NGUYÊN bảng, MIỄN PHÍ, không tính tiền query)
         ▼
 GCS gs://<bucket>/staging_raw/dt=YYYY-MM-DD/part-*.parquet
         │  ClickHouse tự đọc: s3() hoặc file()
         ▼
 fb.events_raw   (giữ nguyên nested: event_params, user_properties, device, geo…)
 ```
+
+Bước dump dùng **extract job** thay vì `EXPORT DATA`: EXPORT DATA bị tính tiền như
+query theo bytes quét (~57GB logical/ngày với app lớn ≈ $0.36/ngày, backfill 1 năm
+≈ $130), extract job thì $0 và output Parquet/SNAPPY y hệt. Đánh đổi duy nhất:
+extract chỉ xuất nguyên bảng (không WHERE/transform — đúng nguyên tắc dump thô) và
+không có overwrite (DAG tự dọn prefix trước khi extract). Đường `EXPORT DATA` cũ
+vẫn còn trong `bq/export.py` (đánh dấu LEGACY) cho trường hợp sau này cần export có lọc.
+Xem [RUNBOOK_EXTRACT_JOB.md](RUNBOOK_EXTRACT_JOB.md) để chạy tay/kiểm chứng.
 
 Nguyên tắc: BigQuery chỉ dump thô; mọi xử lý sau này làm trong ClickHouse;
 Airflow chỉ orchestrate — Python không parse dữ liệu.
@@ -125,7 +133,7 @@ thành string nên phải cast thêm ở đầu đọc. Parquet là format duy n
 
 | DAG | Lịch | Việc |
 |---|---|---|
-| `firebase_raw_daily` | `0 4 * * *` (giờ VN), catchup | resolve nguồn (final → fallback intraday → skip) → count BQ → `EXPORT DATA` → verify GCS → (stage nếu `file`) → `DROP PARTITION` → `INSERT` → quality checks → **flatten vào `fb.events_flat`** → cleanup → ghi log |
+| `firebase_raw_daily` | `0 4 * * *` (giờ VN), catchup | resolve nguồn (final → fallback intraday → skip) → count BQ → dọn staging prefix → **extract job** (miễn phí, không tính tiền query) → verify GCS → (stage nếu `file`) → `DROP PARTITION` → `INSERT` → quality checks → **flatten vào `fb.events_flat`** → cleanup → ghi log |
 | `firebase_raw_backfill` | manual | params `date_from`/`date_to`/`use_existing_gcs` (default `true` — đọc thẳng prefix `analytics_352963567/events_intraday/` có sẵn, tự detect layout, bỏ qua export BQ). Tuần tự từng ngày. Lưu ý: prefix có sẵn chứa file `.gz` (không phải Parquet) nên `use_existing_gcs=true` chỉ dùng được với prefix chứa Parquet |
 | `firebase_flat_reprocess` | manual | flatten lại `fb.events_flat` từ `fb.events_raw` theo dải ngày — KHÔNG đụng BigQuery |
 | `clickhouse_maintenance` | `0 3 * * 0` | `OPTIMIZE ... FINAL` partition tuần trước + báo cáo `system.parts`/`system.columns`, cảnh báo vượt ngưỡng |

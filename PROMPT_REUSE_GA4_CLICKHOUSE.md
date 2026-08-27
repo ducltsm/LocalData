@@ -31,7 +31,8 @@ Xây pipeline nạp GA4 export từ BigQuery vào ClickHouse gồm HAI tầng:
 
 ```
 BigQuery events_[intraday_]YYYYMMDD
-        │  EXPORT DATA (SELECT * — không transform, PHẢI là Parquet)
+        │  EXTRACT JOB (bq extract — nguyên bảng, MIỄN PHÍ; PHẢI là Parquet.
+        │  KHÔNG dùng EXPORT DATA: bị tính tiền như query theo bytes quét)
         ▼
 GCS gs://<GCS_BUCKET>/staging_raw/dt=YYYY-MM-DD/part-*.parquet
         │  ClickHouse tự đọc: s3() (ưu tiên) hoặc file() (fallback)
@@ -98,8 +99,10 @@ trong git.
 
 1. `resolve_source`: có `events_<ds_nodash>` dùng final (`is_intraday=0`), không thì
    fallback `events_intraday_<ds_nodash>`, cả hai không có → `AirflowSkipException`.
-2. `EXPORT DATA` qua `BigQueryInsertJobOperator` (SQL render sẵn từ resolve_source,
-   pull qua XCom template) — `overwrite=true`, PARQUET/SNAPPY.
+2. Dump qua **extract job** — `BigQueryToGCSOperator` (export_format PARQUET,
+   compression SNAPPY), source table pull từ XCom của resolve_source. Extract job
+   KHÔNG có overwrite → thêm task dọn staging prefix NGAY TRƯỚC nó. (EXPORT DATA
+   chỉ dùng khi cần export có lọc — trả phí quét theo bytes.)
 3. Verify GCS có file, push số file + bytes.
 4. DROP PARTITION → INSERT (một câu, cột tường minh, KHÔNG `SELECT *`).
 5. Quality checks: row count so BigQuery — bảng **final bắt buộc lệch 0**, bảng

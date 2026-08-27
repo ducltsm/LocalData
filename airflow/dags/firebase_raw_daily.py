@@ -17,8 +17,8 @@ from datetime import timedelta
 import pendulum
 from airflow.decorators import dag, task
 from airflow.exceptions import AirflowSkipException
-from airflow.providers.google.cloud.operators.bigquery import BigQueryInsertJobOperator
 from airflow.providers.google.cloud.operators.gcs import GCSListObjectsOperator
+from airflow.providers.google.cloud.transfers.bigquery_to_gcs import BigQueryToGCSOperator
 from airflow.utils.task_group import TaskGroup
 
 log = logging.getLogger(__name__)
@@ -72,7 +72,6 @@ def firebase_raw_daily() -> None:
     def resolve_source(logical_date: pendulum.DateTime | None = None) -> dict:
         """Ưu tiên bảng daily final, fallback intraday; cả hai không có -> skip run."""
         from fb_pipeline.bq import client as bq
-        from fb_pipeline.bq.export import render_export_sql
         from fb_pipeline.config import load_settings
 
         ds = _target_ds(logical_date)
@@ -98,14 +97,8 @@ def firebase_raw_daily() -> None:
         return {
             "source_table": source_table,
             "is_intraday": is_intraday,
-            "export_sql": render_export_sql(
-                project_id=settings.gcp_project_id,
-                dataset=settings.bq_dataset,
-                source_table=source_table,
-                bucket=settings.gcs_bucket,
-                staging_prefix=settings.gcs_staging_prefix,
-                ds=ds,
-            ),
+            # BigQueryToGCSOperator nhận dạng project.dataset.table
+            "source_fqtn": f"{settings.gcp_project_id}.{settings.bq_dataset}.{source_table}",
         }
 
     @task
@@ -122,17 +115,34 @@ def firebase_raw_daily() -> None:
         log.info("BigQuery %s: %d dòng", src["source_table"], n)
         return n
 
-    dump_raw_to_gcs = BigQueryInsertJobOperator(
+    @task
+    def clean_staging_prefix(logical_date: pendulum.DateTime | None = None) -> None:
+        """Xoá staging prefix của ngày trước khi extract.
+
+        Extract job KHÔNG có overwrite như EXPORT DATA — không dọn trước thì file
+        thừa của run cũ nằm lẫn và bị đọc trùng.
+        """
+        from fb_pipeline.config import load_settings
+        from fb_pipeline.gcs import client as gcs
+
+        ds = _target_ds(logical_date)
+        settings = load_settings()
+        storage = gcs.get_client(settings.gcp_project_id)
+        gcs.delete_prefix(storage, settings.gcs_bucket, f"{settings.gcs_staging_prefix}/dt={ds}/")
+
+    # Extract job (bq extract): xuất NGUYÊN bảng ra Parquet — không dùng slot,
+    # KHÔNG tính tiền query (EXPORT DATA cũ quét ~57GB logical/ngày với app lớn).
+    dump_raw_to_gcs = BigQueryToGCSOperator(
         task_id="dump_raw_to_gcs",
         gcp_conn_id="google_cloud_default",
-        project_id=_PROJECT,
+        source_project_dataset_table="{{ ti.xcom_pull(task_ids='resolve_source')['source_fqtn'] }}",
+        destination_cloud_storage_uris=[
+            "gs://" + _BUCKET + "/" + _STAGING
+            + "/dt={{ logical_date.in_timezone('" + _TZ + "').strftime('%Y-%m-%d') }}/part-*.parquet"
+        ],
+        export_format="PARQUET",
+        compression="SNAPPY",
         location=_LOCATION,
-        configuration={
-            "query": {
-                "query": "{{ ti.xcom_pull(task_ids='resolve_source')['export_sql'] }}",
-                "useLegacySql": False,
-            }
-        },
     )
 
     list_gcs_objects = GCSListObjectsOperator(
@@ -420,6 +430,7 @@ def firebase_raw_daily() -> None:
     # ------------------------------------------------------------------ wiring
     src = resolve_source()
     bq_rows = count_bq_rows(src)
+    cleaned_prefix = clean_staging_prefix()
     verified = verify_gcs_objects(list_gcs_objects.output)
     staged = stage_files()
     dropped = drop_partition()
@@ -432,7 +443,7 @@ def firebase_raw_daily() -> None:
     cleaned = cleanup()
     logged = write_ingestion_log()
 
-    bq_rows >> dump_raw_to_gcs >> list_gcs_objects >> verified >> staged
+    bq_rows >> cleaned_prefix >> dump_raw_to_gcs >> list_gcs_objects >> verified >> staged
     # drop chạy khi verify OK dù stage bị skip (strategy s3) — và skip khi cả ngày bị skip
     [verified, staged] >> dropped >> inserted
     inserted >> qc_tasks >> flattened >> cleaned >> logged

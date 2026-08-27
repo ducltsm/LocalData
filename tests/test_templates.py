@@ -14,7 +14,17 @@ def _settings(base_env: dict[str, str], **overrides: str) -> Settings:
     return load_settings({**base_env, **overrides})
 
 
+def test_extract_staging_uri() -> None:
+    """Đường mặc định (extract job, miễn phí): URI đích có wildcard + đúng layout dt=."""
+    from fb_pipeline.bq.export import staging_uri
+
+    assert staging_uri("b", "staging_raw", DS) == (
+        "gs://b/staging_raw/dt=2026-08-27/part-*.parquet"
+    )
+
+
 def test_export_sql_is_raw_dump() -> None:
+    """LEGACY path (EXPORT DATA — có phí quét): vẫn phải là dump thô nếu được dùng."""
     sql = render_export_sql(
         project_id="p",
         dataset="d",

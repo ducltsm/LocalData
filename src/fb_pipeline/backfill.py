@@ -13,7 +13,7 @@ import shutil
 from datetime import UTC, datetime
 
 from fb_pipeline.bq import client as bq
-from fb_pipeline.bq.export import render_export_sql, run_export
+from fb_pipeline.bq.export import run_extract
 from fb_pipeline.clickhouse import ingest
 from fb_pipeline.clickhouse.client import get_client
 from fb_pipeline.config import Settings
@@ -93,16 +93,18 @@ def process_day(settings: Settings, ds: str, run_id: str, use_existing_gcs: bool
             bq_row_count = bq.count_rows(
                 bq_client, settings.gcp_project_id, settings.bq_dataset, source_table
             )
-            run_export(
+            # Extract job không có overwrite -> dọn prefix của ngày trước khi extract
+            gcs.delete_prefix(
+                storage, settings.gcs_bucket, f"{settings.gcs_staging_prefix}/dt={ds}/"
+            )
+            run_extract(
                 bq_client,
-                render_export_sql(
-                    project_id=settings.gcp_project_id,
-                    dataset=settings.bq_dataset,
-                    source_table=source_table,
-                    bucket=settings.gcs_bucket,
-                    staging_prefix=settings.gcs_staging_prefix,
-                    ds=ds,
-                ),
+                project_id=settings.gcp_project_id,
+                dataset=settings.bq_dataset,
+                source_table=source_table,
+                bucket=settings.gcs_bucket,
+                staging_prefix=settings.gcs_staging_prefix,
+                ds=ds,
             )
             object_glob = ingest.staging_object_glob(settings, ds)
 
