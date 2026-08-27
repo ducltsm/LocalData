@@ -31,6 +31,9 @@ log = logging.getLogger(__name__)
 FLAT_TABLE = "events_flat"
 REGISTRY_TABLE = "flat_schema_registry"
 
+# Partition raw lớn hơn ngưỡng này thì flatten theo nhiều chunk (xem flatten_day)
+_CHUNK_ROWS = 10_000_000
+
 # Thứ tự xử lý cố định: event_params đặt tên trước, user_properties đụng tên thì thêm prefix
 SOURCES = ("event_params", "user_properties")
 
@@ -348,7 +351,13 @@ def _sql_str(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "\\'")
 
 
-def render_flat_insert(database: str, ds: str, run_id: str, registry: list[RegistryRow]) -> str:
+def render_flat_insert(
+    database: str,
+    ds: str,
+    run_id: str,
+    registry: list[RegistryRow],
+    extra_where: str | None = None,
+) -> str:
     """Một câu INSERT phẳng hoá partition ds: cột liệt kê tường minh, không SELECT *.
 
     SELECT KHÔNG đặt alias: INSERT ... SELECT map cột theo VỊ TRÍ, còn alias trùng
@@ -373,13 +382,16 @@ def render_flat_insert(database: str, ds: str, run_id: str, registry: list[Regis
     ]
     select_block = ",\n".join(selects)
     column_block = ",\n    ".join(names)
+    where = f"WHERE _dt = toDate('{ds}')"
+    if extra_where:
+        where += f" AND {extra_where}"
     return (
         f"INSERT INTO {database}.{FLAT_TABLE}\n(\n    {column_block}\n)\n"
         f"WITH\n"
         f"    CAST(event_params, '{_EP_MAP}') AS _ep,\n"
         f"    CAST(user_properties, '{_UP_MAP}') AS _up\n"
         f"SELECT\n{select_block}\n"
-        f"FROM {database}.events_raw\nWHERE _dt = toDate('{ds}')"
+        f"FROM {database}.events_raw\n{where}"
     )
 
 
@@ -395,23 +407,36 @@ def flatten_day(client: Client, settings: Settings, ds: str, run_id: str) -> dic
     added = ensure_flat_columns(client, database)
     registry = load_registry(client, database)
 
+    raw_rows = partition_row_count(client, database, ds)
     drop_partition(client, database, ds, table=FLAT_TABLE)
-    sql = render_flat_insert(database, ds, run_id, registry)
-    # Bảng flat rất rộng (hàng trăm cột) — block mặc định (~1M dòng squash trước khi
-    # ghi) sẽ OOM. Ép block nhỏ + flush sớm theo bytes; đã cân chỉnh thực tế trên
-    # partition 253k dòng / MAX_MEMORY_USAGE 4GB.
+
+    # Bảng flat rất rộng (hàng trăm cột): memory của INSERT SELECT TĂNG DẦN theo
+    # tiến độ (buffer ghi cột tích luỹ theo số part) — partition lớn chạy một câu
+    # là OOM (đã dính thật ở 52M dòng / 6GiB). Hai lớp chống:
+    # 1. block đủ to để ít part (256k dòng / 256MB thay vì 16k),
+    # 2. partition > _CHUNK_ROWS thì chia thành nhiều câu INSERT theo hash —
+    #    mỗi câu chỉ xử lý ~_CHUNK_ROWS dòng, memory reset giữa các câu.
     flatten_settings = {
         **insert_settings(settings),
-        "max_threads": 2,
+        "max_threads": 1,
         "max_insert_threads": 1,
-        "max_block_size": 16384,
-        "min_insert_block_size_rows": 16384,
-        "min_insert_block_size_bytes": 128 * 1024 * 1024,
+        "max_block_size": 8192,
+        "min_insert_block_size_rows": 262144,
+        "min_insert_block_size_bytes": 256 * 1024 * 1024,
+        "max_insert_delayed_streams_for_parallel_write": 0,
     }
-    client.command(sql, settings=flatten_settings)
+    n_chunks = max(1, -(-raw_rows // _CHUNK_ROWS))  # ceil
+    for chunk in range(n_chunks):
+        extra = (
+            f"cityHash64(coalesce(user_pseudo_id, ''), event_timestamp) "
+            f"% {n_chunks} = {chunk}"
+        ) if n_chunks > 1 else None
+        sql = render_flat_insert(database, ds, run_id, registry, extra_where=extra)
+        client.command(sql, settings=flatten_settings)
+        if n_chunks > 1:
+            log.info("Flatten %s: xong chunk %d/%d", ds, chunk + 1, n_chunks)
 
     flat_rows = partition_row_count(client, database, ds, table=FLAT_TABLE)
-    raw_rows = partition_row_count(client, database, ds)
     if flat_rows != raw_rows:
         raise RuntimeError(f"Flatten lệch dòng: flat={flat_rows}, raw={raw_rows} (ds={ds})")
     log.info(
