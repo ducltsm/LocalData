@@ -1,0 +1,14 @@
+# Không đưa secrets / env / rác vào build context
+secrets/
+.env
+.git/
+data/
+airflow/logs/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+PLAN.md
+README.md
+ROADMAP.md

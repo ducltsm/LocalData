@@ -1,0 +1,23 @@
+{#-
+  INSERT một câu duy nhất, liệt kê cột TƯỜNG MINH theo source_schema.py — không SELECT *.
+  read_source được render sẵn từ read_source.sql.j2 và truyền vào đây.
+  Settings (max_insert_threads, max_memory_usage, input_format_*) truyền qua
+  clickhouse-connect ở tầng Python, không nằm trong SQL.
+-#}
+INSERT INTO {{ database }}.events_raw
+(
+{% for c in columns %}    {{ c }},
+{% endfor %}    _dt,
+    _ingested_at,
+    _run_id,
+    _source_table,
+    _is_intraday
+)
+SELECT
+{% for c in columns %}    {{ c }},
+{% endfor %}    toDate('{{ ds }}') AS _dt,
+    now() AS _ingested_at,
+    '{{ run_id }}' AS _run_id,
+    '{{ source_table }}' AS _source_table,
+    {{ is_intraday }} AS _is_intraday
+FROM {{ read_source }}

@@ -1,0 +1,7 @@
+<clickhouse>
+    <logger>
+        <level>information</level>
+        <console>1</console>
+        <!-- Giữ log file mặc định của image, chỉ hạ mức ồn -->
+    </logger>
+</clickhouse>

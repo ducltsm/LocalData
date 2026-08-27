@@ -1,0 +1,182 @@
+name: firebase-clickhouse-pipeline
+
+# ---------------------------------------------------------------------------
+# Env dùng chung cho pipeline (Airflow tasks + ClickHouse named collection)
+# ---------------------------------------------------------------------------
+x-pipeline-env: &pipeline-env
+  GCP_PROJECT_ID: ${GCP_PROJECT_ID}
+  BQ_DATASET: ${BQ_DATASET}
+  BQ_LOCATION: ${BQ_LOCATION:-US}
+  GCS_BUCKET: ${GCS_BUCKET}
+  GCS_RAW_PREFIX: ${GCS_RAW_PREFIX}
+  GCS_STAGING_PREFIX: ${GCS_STAGING_PREFIX:-staging_raw}
+  GCS_HMAC_ACCESS_KEY: ${GCS_HMAC_ACCESS_KEY:-}
+  GCS_HMAC_SECRET: ${GCS_HMAC_SECRET:-}
+  INGEST_STRATEGY: ${INGEST_STRATEGY:-s3}
+  RAW_TTL_DAYS: ${RAW_TTL_DAYS:-0}
+  CLEANUP_STAGING: ${CLEANUP_STAGING:-true}
+  MAX_MEMORY_USAGE: ${MAX_MEMORY_USAGE:-4000000000}
+  MAX_INSERT_THREADS: ${MAX_INSERT_THREADS:-4}
+  CLICKHOUSE_HOST: clickhouse
+  CLICKHOUSE_PORT: "8123"
+  CLICKHOUSE_USER: ${CLICKHOUSE_USER:-fb}
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Đặt CLICKHOUSE_PASSWORD trong .env}
+  CLICKHOUSE_DB: ${CLICKHOUSE_DB:-fb}
+  CH_USER_FILES_DIR: /var/lib/clickhouse/user_files
+  FB_SQL_DIR: /opt/fb_pipeline/clickhouse/sql
+  TZ: ${TZ:-Asia/Ho_Chi_Minh}
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: docker/airflow/Dockerfile
+  image: fb-pipeline-airflow:latest
+  user: "${AIRFLOW_UID:-50000}:0"
+  environment:
+    <<: *pipeline-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@postgres/${POSTGRES_DB:-airflow}
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DEFAULT_TIMEZONE: ${TZ:-Asia/Ho_Chi_Minh}
+    AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE: ${TZ:-Asia/Ho_Chi_Minh}
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY:-local-dev-secret}
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    # Credential: key JSON chỉ mount read-only, không COPY vào image
+    GOOGLE_APPLICATION_CREDENTIALS: /opt/secrets/gcp-sa.json
+    AIRFLOW_CONN_GOOGLE_CLOUD_DEFAULT: '{"conn_type": "google_cloud_platform", "extra": {"key_path": "/opt/secrets/gcp-sa.json", "project": "${GCP_PROJECT_ID}"}}'
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - airflow_logs:/opt/airflow/logs
+    - ./src:/opt/fb_pipeline/src
+    - ./clickhouse/sql:/opt/fb_pipeline/clickhouse/sql
+    - ./tests:/opt/fb_pipeline/tests
+    - ./secrets:/opt/secrets:ro
+    # Shared volume với ClickHouse — nền cho strategy `file()` và integration test
+    - ch_user_files:/var/lib/clickhouse/user_files
+
+services:
+  # Chỉnh quyền shared volume một lần để user airflow (50000) ghi được
+  volume-init:
+    image: busybox:1.36
+    command: ["sh", "-c", "mkdir -p /var/lib/clickhouse/user_files/staging && chmod 0777 /var/lib/clickhouse/user_files /var/lib/clickhouse/user_files/staging"]
+    volumes:
+      - ch_user_files:/var/lib/clickhouse/user_files
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-fb}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Đặt CLICKHOUSE_PASSWORD trong .env}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-fb}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+      # named collection gcs_raw đọc HMAC từ env (clickhouse/config.d/s3.xml)
+      GCS_HMAC_ACCESS_KEY: ${GCS_HMAC_ACCESS_KEY:-}
+      GCS_HMAC_SECRET: ${GCS_HMAC_SECRET:-}
+      TZ: ${TZ:-Asia/Ho_Chi_Minh}
+    volumes:
+      - ch_data:/var/lib/clickhouse
+      - ch_user_files:/var/lib/clickhouse/user_files
+      # Mount từng file để không đè config.d mặc định của image (listen 0.0.0.0)
+      - ./clickhouse/config.d/logging.xml:/etc/clickhouse-server/config.d/fb-logging.xml:ro
+      - ./clickhouse/config.d/memory.xml:/etc/clickhouse-server/config.d/fb-memory.xml:ro
+      - ./clickhouse/config.d/s3.xml:/etc/clickhouse-server/config.d/fb-s3.xml:ro
+      # default-user.xml là tên file entrypoint tự ghi khi CLICKHOUSE_USER được set,
+      # nên file của ta mount với tên khác
+      - ./clickhouse/users.d/default-user.xml:/etc/clickhouse-server/users.d/fb-profile.xml:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    mem_limit: ${CLICKHOUSE_MEM_LIMIT:-6g}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 20s
+    restart: unless-stopped
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-airflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-airflow}
+      POSTGRES_DB: ${POSTGRES_DB:-airflow}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-airflow}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username "${AIRFLOW_ADMIN_USER:-admin}" \
+          --password "${AIRFLOW_ADMIN_PASSWORD:-admin}" \
+          --firstname Admin --lastname User \
+          --role Admin --email admin@example.com || true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      volume-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    mem_limit: ${AIRFLOW_MEM_LIMIT:-2g}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8974/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "${AIRFLOW_WEBSERVER_PORT:-8080}:8080"
+    mem_limit: ${AIRFLOW_MEM_LIMIT:-2g}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+
+volumes:
+  ch_data:
+  ch_user_files:
+  pg_data:
+  airflow_logs:

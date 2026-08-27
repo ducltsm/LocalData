@@ -1,0 +1,17 @@
+{#-
+  Macro nguồn đọc — chỗ DUY NHẤT định nghĩa cách ClickHouse đọc Parquet staging.
+  Phase 2 thêm đích ghi mới thì chỉ cắm lại macro này, không sửa chỗ khác.
+
+  strategy='s3'  : đọc thẳng GCS qua endpoint S3-compatible.
+                   Credential HMAC nằm trong named collection `gcs_raw`
+                   (clickhouse/config.d/s3.xml, nạp từ env) — không xuất hiện trong SQL.
+  strategy='file': đọc Parquet đã được Airflow tải vào user_files (shared volume).
+                   Đường dẫn tương đối so với /var/lib/clickhouse/user_files.
+
+  Python validate strategy trước khi render (fb_pipeline.clickhouse.ingest).
+-#}
+{%- if strategy == 's3' -%}
+s3(gcs_raw, url = 'https://storage.googleapis.com/{{ bucket }}/{{ object_glob }}', format = 'Parquet', structure = '{{ structure }}')
+{%- elif strategy == 'file' -%}
+file('{{ local_glob }}', 'Parquet', '{{ structure }}')
+{%- endif -%}

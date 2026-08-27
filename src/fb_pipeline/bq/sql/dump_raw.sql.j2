@@ -1,0 +1,12 @@
+{#-
+  Dump THÔ: SELECT * — không UNNEST, không cast, không đổi tên cột.
+  Bắt buộc PARQUET: CSV mất nested hoàn toàn; JSON thì BigQuery ghi INT64 thành
+  string. Parquet là format duy nhất giữ ARRAY<STRUCT<...>> của GA4 trung thực.
+-#}
+EXPORT DATA OPTIONS(
+  uri = 'gs://{{ bucket }}/{{ staging_prefix }}/dt={{ ds }}/part-*.parquet',
+  format = 'PARQUET',
+  compression = 'SNAPPY',
+  overwrite = true
+) AS
+SELECT * FROM `{{ project_id }}.{{ dataset }}.{{ source_table }}`;

@@ -1,0 +1,28 @@
+<clickhouse>
+    <!--
+      File này được mount vào container với tên users.d/fb-profile.xml
+      (entrypoint của image tự ghi users.d/default-user.xml khi CLICKHOUSE_USER được set,
+      nên không được mount đè đúng tên đó).
+      User pipeline do entrypoint tạo từ env CLICKHOUSE_USER/CLICKHOUSE_PASSWORD
+      và dùng profile "default" bên dưới.
+    -->
+    <profiles>
+        <default>
+            <log_queries>1</log_queries>
+            <!-- Insert Parquet lớn: cho phép query chạy lâu, không tự cắt -->
+            <max_execution_time>0</max_execution_time>
+        </default>
+    </profiles>
+
+    <!--
+      Cho user pipeline dùng named collection gcs_raw (config.d/s3.xml).
+      Đã verify trên 24.8: thiếu quyền này thì s3(gcs_raw, ...) báo ACCESS_DENIED.
+      LƯU Ý: tên user hardcode ở đây — nếu đổi CLICKHOUSE_USER trong .env thì đổi
+      tag <fb> bên dưới theo (XML không nhận biến env cho tên tag).
+    -->
+    <users>
+        <fb>
+            <named_collection_control>1</named_collection_control>
+        </fb>
+    </users>
+</clickhouse>

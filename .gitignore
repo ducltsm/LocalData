@@ -1,0 +1,33 @@
+# Secrets & credentials — KHÔNG BAO GIỜ commit
+secrets/*
+!secrets/.gitkeep
+!secrets/*.example.json
+.env
+*.json
+!*.example.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.venv/
+
+# Airflow runtime
+airflow/logs/
+airflow/plugins/
+airflow-webserver.pid
+
+# Data / staging
+data/
+*.parquet
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

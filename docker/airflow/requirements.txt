@@ -1,0 +1,7 @@
+# Cài kèm --constraint của Airflow 2.10.5/py3.12 (xem Dockerfile).
+# Không cần pandas; pyarrow chỉ là dev dependency cho test (cài riêng trong Dockerfile).
+apache-airflow-providers-google
+clickhouse-connect
+google-cloud-bigquery
+google-cloud-storage
+jinja2

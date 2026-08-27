@@ -1,0 +1,14 @@
+<clickhouse>
+    <!--
+      Named collection cho GCS qua giao thức S3 (XML-based, định nghĩa từ env).
+      Credential nằm ở đây thay vì trong chuỗi SQL -> không lọt vào log Airflow.
+      HMAC key tạo ở: Cloud Storage -> Settings -> Interoperability.
+      Key JSON của service account KHÔNG dùng được với s3().
+    -->
+    <named_collections>
+        <gcs_raw>
+            <access_key_id from_env="GCS_HMAC_ACCESS_KEY"/>
+            <secret_access_key from_env="GCS_HMAC_SECRET"/>
+        </gcs_raw>
+    </named_collections>
+</clickhouse>
