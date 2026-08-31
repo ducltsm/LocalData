@@ -21,7 +21,7 @@ x-pipeline-env: &pipeline-env
   CLICKHOUSE_PORT: "8123"
   CLICKHOUSE_USER: ${CLICKHOUSE_USER:-fb}
   CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Đặt CLICKHOUSE_PASSWORD trong .env}
-  CLICKHOUSE_DB: ${CLICKHOUSE_DB:-fb}
+  CLICKHOUSE_DB: ${CLICKHOUSE_DB:-chat01}
   CH_USER_FILES_DIR: /var/lib/clickhouse/user_files
   FB_SQL_DIR: /opt/fb_pipeline/clickhouse/sql
   TZ: ${TZ:-Asia/Ho_Chi_Minh}
@@ -70,7 +70,7 @@ services:
     environment:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-fb}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Đặt CLICKHOUSE_PASSWORD trong .env}
-      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-fb}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-chat01}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
       # named collection gcs_raw đọc HMAC từ env (clickhouse/config.d/s3.xml)
       GCS_HMAC_ACCESS_KEY: ${GCS_HMAC_ACCESS_KEY:-}
