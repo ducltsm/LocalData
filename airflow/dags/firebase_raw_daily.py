@@ -348,6 +348,26 @@ def firebase_raw_daily() -> None:
         log.info("Flatten xong: %s", result)
         return result
 
+    @task
+    def build_mart(
+        logical_date: pendulum.DateTime | None = None, run_id: str | None = None
+    ) -> dict:
+        """Rebuild các bảng mart_* cho partition vừa flatten (xem fb_pipeline.clickhouse.mart).
+
+        Idempotent theo partition như flatten: DROP PARTITION từng bảng + insert
+        lại từ events_flat. QC bên trong: sum(mart_daily_events.events) == số dòng flat.
+        """
+        from fb_pipeline.clickhouse.client import get_client
+        from fb_pipeline.clickhouse.mart import build_mart_day
+        from fb_pipeline.config import load_settings
+
+        settings = load_settings()
+        result = build_mart_day(
+            get_client(settings), settings, _target_ds(logical_date), run_id or ""
+        )
+        log.info("Mart xong: %s", result)
+        return result
+
     @task(trigger_rule="none_failed_min_one_success")
     def cleanup(logical_date: pendulum.DateTime | None = None) -> None:
         """Xoá staging GCS/local theo CLEANUP_STAGING (chỉ chạy khi mọi bước trước OK)."""
@@ -440,12 +460,13 @@ def firebase_raw_daily() -> None:
         qc_tasks = [qc_row_count(src, bq_rows), qc_metrics(), qc_nested_readable()]
 
     flattened = flatten()
+    marted = build_mart()
     cleaned = cleanup()
     logged = write_ingestion_log()
 
     bq_rows >> cleaned_prefix >> dump_raw_to_gcs >> list_gcs_objects >> verified >> staged
     # drop chạy khi verify OK dù stage bị skip (strategy s3) — và skip khi cả ngày bị skip
     [verified, staged] >> dropped >> inserted
-    inserted >> qc_tasks >> flattened >> cleaned >> logged
+    inserted >> qc_tasks >> flattened >> marted >> cleaned >> logged
 
 firebase_raw_daily()

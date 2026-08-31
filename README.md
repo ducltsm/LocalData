@@ -133,9 +133,10 @@ thành string nên phải cast thêm ở đầu đọc. Parquet là format duy n
 
 | DAG | Lịch | Việc |
 |---|---|---|
-| `firebase_raw_daily` | `0 4 * * *` (giờ VN), catchup | resolve nguồn (final → fallback intraday → skip) → count BQ → dọn staging prefix → **extract job** (miễn phí, không tính tiền query) → verify GCS → (stage nếu `file`) → `DROP PARTITION` → `INSERT` → quality checks → **flatten vào `fb.events_flat`** → cleanup → ghi log |
+| `firebase_raw_daily` | `0 4 * * *` (giờ VN), catchup | resolve nguồn (final → fallback intraday → skip) → count BQ → dọn staging prefix → **extract job** (miễn phí, không tính tiền query) → verify GCS → (stage nếu `file`) → `DROP PARTITION` → `INSERT` → quality checks → **flatten vào `fb.events_flat`** → **build mart `fb.mart_*`** → cleanup → ghi log |
 | `firebase_raw_backfill` | manual | params `date_from`/`date_to`/`use_existing_gcs` (default `true` — đọc thẳng prefix `analytics_352963567/events_intraday/` có sẵn, tự detect layout, bỏ qua export BQ). Tuần tự từng ngày. Lưu ý: prefix có sẵn chứa file `.gz` (không phải Parquet) nên `use_existing_gcs=true` chỉ dùng được với prefix chứa Parquet |
-| `firebase_flat_reprocess` | manual | flatten lại `fb.events_flat` từ `fb.events_raw` theo dải ngày — KHÔNG đụng BigQuery |
+| `firebase_flat_reprocess` | manual | flatten lại `fb.events_flat` từ `fb.events_raw` theo dải ngày — KHÔNG đụng BigQuery. Sau khi reprocess flatten nhớ chạy `firebase_mart_reprocess` cho cùng dải ngày |
+| `firebase_mart_reprocess` | manual | rebuild các bảng `fb.mart_*` từ `fb.events_flat` theo dải ngày (`date_from`/`date_to`) — KHÔNG đụng BigQuery |
 | `clickhouse_maintenance` | `0 3 * * 0` | `OPTIMIZE ... FINAL` partition tuần trước + báo cáo `system.parts`/`system.columns`, cảnh báo vượt ngưỡng |
 
 Quality checks của DAG daily: row count ClickHouse == BigQuery — bảng **final** bắt
@@ -188,6 +189,51 @@ SELECT event_date, event_name, ga_session_id_int, firebase_screen_class_str, geo
 FROM fb.events_flat WHERE _dt = '2026-08-27' LIMIT 10;
 ```
 
+## Data mart `fb.mart_*` (Phase 3)
+
+Bốn bảng tổng hợp theo ngày từ `events_flat`, cùng cơ chế idempotent
+(PARTITION BY `_dt`, rebuild = DROP PARTITION + insert lại — không đụng
+`events_raw`/BigQuery). Spec cột nằm ở
+[`src/fb_pipeline/clickhouse/mart.py`](src/fb_pipeline/clickhouse/mart.py)
+(`MART_TABLES`); DDL `06_mart.sql` **sinh từ spec**:
+`python -m fb_pipeline.tools.mart_day --print-ddl > clickhouse/sql/06_mart.sql`
+(test `test_mart.py` bắt lệch).
+
+| Bảng | Grain | Nội dung |
+|---|---|---|
+| `mart_daily_kpi` | `_dt` (1 dòng/ngày) | DAU, new users, sessions, engagement, prompt/chat/paywall, purchases, `revenue_usd`, app_removes |
+| `mart_daily_events` | `_dt, event_name` | events/users/sessions theo từng event — `sum(events)` phải bằng số dòng flat (QC tự động) |
+| `mart_daily_geo` | `_dt, country, platform` | users, new users, sessions, doanh thu theo thị trường |
+| `mart_user_daily` | `_dt, user_pseudo_id` | 1 dòng/user/ngày hoạt động: is_new, sessions, prompts, revenue, platform/country/app_version cuối ngày — nền cho retention/LTV |
+| `mart_retention` (view) | cohort × day_n | cohort theo ngày `first_open`; dòng `day_n = 0` là cohort size → retention Dn = `retained_users(n) / retained_users(0)` |
+
+Mart build tự động trong DAG daily (sau flatten). Chạy tay / chạy lại:
+
+```bash
+make mart DATE=2026-08-27
+```
+
+hoặc trigger DAG `firebase_mart_reprocess` với `date_from`/`date_to`. Ví dụ query:
+
+```sql
+-- KPI theo ngày
+SELECT _dt, dau, new_users, sessions, prompts_sent, revenue_usd
+FROM fb.mart_daily_kpi ORDER BY _dt;
+
+-- Retention D1/D7 (%)
+SELECT cohort_dt,
+       anyIf(retained_users, day_n = 0)                                    AS cohort_size,
+       round(anyIf(retained_users, day_n = 1) / cohort_size * 100, 1)      AS d1_pct,
+       round(anyIf(retained_users, day_n = 7) / cohort_size * 100, 1)      AS d7_pct
+FROM fb.mart_retention GROUP BY cohort_dt ORDER BY cohort_dt;
+```
+
+Ba metric session/engagement phụ thuộc cột động của `events_flat`
+(`ga_session_id_int`, `session_engaged_int`, `engagement_time_msec_int`) — database
+mới chưa flatten lần nào thì các metric đó bằng 0 thay vì vỡ INSERT. Metric
+nghiệp vụ (`send_prompt`, `paywall_view`, `in_app_purchase`…) đặt theo app chat01;
+app khác không có event đó thì cột bằng 0.
+
 ## Query dữ liệu nested
 
 Cách dùng `events_raw` trực tiếp trước khi có phase 2 (cú pháp đã verify trên
@@ -230,6 +276,7 @@ Khảo sát toàn bộ key + kiểu (chuẩn bị phase 2): `make explore-keys D
 - `peek DATE=…` — xem 1 dòng đầy đủ `FORMAT Vertical`
 - `explore-keys DATE=…` — read-only, thống kê key/kiểu của `event_params`/`user_properties`
 - `flatten DATE=…` — flatten lại 1 ngày từ `events_raw` vào `events_flat` (không đụng BigQuery)
+- `mart DATE=…` — rebuild các bảng `mart_*` 1 ngày từ `events_flat` (không đụng BigQuery)
 
 ## Troubleshooting
 

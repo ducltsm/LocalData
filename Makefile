@@ -7,7 +7,7 @@ AF_EXEC := $(COMPOSE) exec airflow-scheduler
 CH_EXEC := $(COMPOSE) exec clickhouse
 
 .PHONY: up down restart logs ps build init ch-cli ch-schema airflow-cli test lint \
-        dag-test clean sample-parquet peek explore-keys flatten _need-date
+        dag-test clean sample-parquet peek explore-keys flatten mart _need-date
 
 up: ## Build + khởi động toàn bộ stack, apply schema ClickHouse
 	$(COMPOSE) up -d --build --wait
@@ -67,6 +67,9 @@ explore-keys: _need-date ## Read-only: thống kê key/kiểu của event_params
 
 flatten: _need-date ## Flatten lại 1 ngày từ events_raw vào events_flat (không đụng BigQuery)
 	$(AF_EXEC) python -m fb_pipeline.tools.flatten_day --date $(DATE)
+
+mart: _need-date ## Rebuild các bảng mart_* 1 ngày từ events_flat (không đụng BigQuery)
+	$(AF_EXEC) python -m fb_pipeline.tools.mart_day --date $(DATE)
 
 clean: ## Xoá container + VOLUME (mất dữ liệu ClickHouse!) — có xác nhận
 	@printf "Xoá toàn bộ container + volume (MẤT dữ liệu ClickHouse)? [y/N] " && read ans && [ "$$ans" = "y" ]

@@ -40,4 +40,8 @@ Ghi chú kỹ thuật đã verify trên 24.8 (đắt giá, đừng làm lại t�
 - [ ] Flatten `items` (mảng sản phẩm ecommerce) và `ecommerce` — đã có đủ trong
       `events_raw`, chưa đưa lên flat.
 - [ ] `set_timestamp_micros` của user_properties (hiện chỉ nằm trong raw).
-- [ ] Materialized view / bảng tổng hợp phân tích trên events_flat.
+- [x] Bảng tổng hợp phân tích trên events_flat — ĐÃ IMPLEMENT (2026-09-01):
+      4 bảng `mart_*` + view `mart_retention` (spec ở
+      `src/fb_pipeline/clickhouse/mart.py`, DDL 06_mart.sql sinh từ spec,
+      task `build_mart` trong DAG daily + DAG `firebase_mart_reprocess` +
+      `make mart DATE=…`). Xem mục "Data mart" trong README.
